@@ -167,10 +167,12 @@ module TestProf
       # Clean all affected tables (but do not reset cache)
       def clean
         disable_referential_integrity do
-          tables_cache.keys.reverse_each do |table|
-            ActiveRecord::Base.connection.execute %(
-              DELETE FROM #{table}
-            )
+          tables_cache.each do |klass, tables|
+            tables.each do |table|
+              klass.connection.execute %(
+                DELETE FROM #{table}
+              )
+            end
           end
         end
       end
@@ -196,14 +198,20 @@ module TestProf
       end
 
       def subscriber(_event, _start, _finish, _id, data)
+        connection = data.fetch(:connection)
+        connection_klass = if connection.respond_to?(:connection_klass)
+          connection.connection_klass
+        else
+          connection.connection_class
+        end
+
         matches = data.fetch(:sql).match(INSERT_RXP)
         return unless matches
 
         table_name = matches[1]
-
         return if /sqlite_sequence/.match?(table_name)
 
-        tables_cache[table_name] = true
+        tables_cache[connection_klass] << table_name
       end
 
       def report_stats
@@ -266,7 +274,7 @@ module TestProf
       end
 
       def tables_cache
-        @tables_cache ||= {}
+        @tables_cache ||= Hash.new { |h, k| h[k] = [] }
       end
 
       def callbacks

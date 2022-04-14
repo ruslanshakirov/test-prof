@@ -68,9 +68,10 @@ jobs:
         bundle update
     - name: Run RSpec
       env:
+          RAILS_ENV: test
           DB: ${{ matrix.db }}
           DATABASE_URL: postgres://postgres:postgres@localhost:5432
-          DB_NAME: postgres
+          DATABASE_URL_2: postgres://postgres:postgres@localhost:5432
       run: |
         bundle exec rspec --force-color
 
