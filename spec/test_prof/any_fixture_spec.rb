@@ -38,6 +38,10 @@ describe TestProf::AnyFixture, :transactional, :postgres, sqlite: :file do
       end.to change(User, :count).by(1)
         .and change(Post, :count).by(1)
 
+      expect do
+        subject.register(:event) { TestProf::FactoryBot.create(:event) }
+      end.to change(Event, :count).by(1)
+
       subject.clean
 
       # Try to re-register user - should have no effect
@@ -45,6 +49,7 @@ describe TestProf::AnyFixture, :transactional, :postgres, sqlite: :file do
 
       expect(User.count).to eq 0
       expect(Post.count).to eq 0
+      expect(Event.count).to eq 0
     end
   end
 

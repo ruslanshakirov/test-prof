@@ -13,32 +13,104 @@ begin
 rescue LoadError
 end
 
+def sqlite_file_config
+  FileUtils.mkdir_p TestProf.config.output_dir
+  db_path = File.join(TestProf.config.output_dir, "testdb.sqlite")
+  db_path_2 = File.join(TestProf.config.output_dir, "testdb_2.sqlite")
+
+  FileUtils.rm(db_path) if File.file?(db_path)
+  FileUtils.rm(db_path_2) if File.file?(db_path_2)
+
+  {
+    primary: {
+      database: db_path,
+      adapter: "sqlite3"
+    },
+    secondary: {
+      database: db_path_2,
+      adapter: "sqlite3"
+    }
+  }
+end
+
+def postgres_config
+  require "active_record/database_configurations"
+
+  configs = []
+  configs << ActiveRecord::DatabaseConfigurations::UrlConfig.new(
+    "test",
+    "primary",
+    ENV.fetch("DATABASE_URL"),
+    {"database" => ENV.fetch("DB_NAME", "test_prof_test")}
+  )
+
+  configs << ActiveRecord::DatabaseConfigurations::UrlConfig.new(
+    "test",
+    "secondary",
+    ENV.fetch("DATABASE_URL_2"),
+    {"database" => ENV.fetch("DB_NAME_2", "test_prof_test_2")}
+  )
+end
+
 DB_CONFIG =
-  if ENV["DB"] == "sqlite-file"
-    FileUtils.mkdir_p TestProf.config.output_dir
-    db_path = File.join(TestProf.config.output_dir, "testdb.sqlite")
-    FileUtils.rm(db_path) if File.file?(db_path)
-    {adapter: "sqlite3", database: db_path}
-  elsif ENV["DB"] == "postgres"
-    require "active_record/database_configurations"
-    config = ActiveRecord::DatabaseConfigurations::UrlConfig.new(
-      "test",
-      "primary",
-      ENV.fetch("DATABASE_URL"),
-      {"database" => ENV.fetch("DB_NAME", "test_prof_test")}
-    )
-    config.respond_to?(:configuration_hash) ? config.configuration_hash : config.config
+  case ENV["DB"]
+  when "sqlite-file"
+    sqlite_file_config
+  when "postgres"
+    postgres_config
   else
-    {adapter: "sqlite3", database: ":memory:"}
+    {
+      primary: {
+        database: ":memory:",
+        adapter: "sqlite3"
+      },
+      secondary: {
+        database: ":memory:",
+        adapter: "sqlite3"
+      }
+    }
   end
 
-ActiveRecord::Base.establish_connection(**DB_CONFIG)
+ActiveRecord::Base.configurations = DB_CONFIG
+ActiveRecord::Base.legacy_connection_handling = false if ActiveRecord::Base.respond_to?(:legacy_connection_handling)
+
+class ApplicationRecord < ActiveRecord::Base
+  self.abstract_class = true
+  connects_to database: {writing: :primary}
+end
+
+class User < ApplicationRecord
+  validates :name, presence: true
+  has_many :posts, dependent: :destroy
+
+  def clone
+    copy = dup
+    copy.name = "#{name} (cloned)"
+    copy
+  end
+end
+
+class Post < ApplicationRecord
+  belongs_to :user
+
+  attr_accessor :dirty
+end
+
+class SecondaryRecord < ActiveRecord::Base
+  self.abstract_class = true
+  connects_to database: {writing: :secondary}
+end
+
+class Event < SecondaryRecord
+end
 
 # #truncate_tables is not supported in older Rails, let's just ignore the failures
-ActiveRecord::Base.connection.truncate_tables(*ActiveRecord::Base.connection.tables) rescue nil # rubocop:disable Style/RescueModifier
+ApplicationRecord.connection.truncate_tables(*ApplicationRecord.connection.tables) rescue nil # rubocop:disable Style/RescueModifier
+SecondaryRecord.connection.truncate_tables(*SecondaryRecord.connection.tables) rescue nil # rubocop:disable Style/RescueModifier
 
 ActiveRecord::Schema.define do
-  using_pg = ActiveRecord::Base.connection.adapter_name == "PostgreSQL"
+  @connection = ApplicationRecord.connection
+  using_pg = @connection.adapter_name == "PostgreSQL"
 
   enable_extension "pgcrypto" if using_pg
 
@@ -59,24 +131,18 @@ ActiveRecord::Schema.define do
   end
 end
 
-ActiveRecord::Base.logger = Logger.new($stdout) if ENV["LOG"]
+ActiveRecord::Schema.define do
+  @connection = SecondaryRecord.connection
+  using_pg = @connection.adapter_name == "PostgreSQL"
 
-class User < ActiveRecord::Base
-  validates :name, presence: true
-  has_many :posts, dependent: :destroy
+  enable_extension "pgcrypto" if using_pg
 
-  def clone
-    copy = dup
-    copy.name = "#{name} (cloned)"
-    copy
+  create_table :events, id: (using_pg ? :uuid : :bigint), if_not_exists: true do |t|
+    t.string :data
   end
 end
 
-class Post < ActiveRecord::Base
-  belongs_to :user
-
-  attr_accessor :dirty
-end
+ActiveRecord::Base.logger = Logger.new($stdout) if ENV["LOG"]
 
 TestProf::FactoryBot.define do
   factory :user do
@@ -113,6 +179,10 @@ TestProf::FactoryBot.define do
       association :user, factory: %i[user other_trait]
     end
   end
+
+  factory :event do
+    sequence(:data) { |n| "Event ##{n}" }
+  end
 end
 
 Fabricator(:user) do
@@ -122,4 +192,8 @@ end
 Fabricator(:post) do
   text Fabricate.sequence(:text) { |n| "Post ##{n}}" }
   user
+end
+
+Fabricator(:event) do
+  data Fabricate.sequence(:data) { |n| "Event ##{n}}" }
 end
